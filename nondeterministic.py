@@ -9,7 +9,7 @@ from multiprocessing import Pool, Manager, Lock, Queue, Process
 
 from cache import Cache
 
-def sample_deterministic_distortion(m, n):
+def sample_non_deterministic_distortion(m, n):
     """
     Args:
         m (int): Number of candidates.
@@ -57,7 +57,7 @@ def solve_worker_chunk(chunk_args):
                     if opt == w or opt in dominated_list or w in dominated_list:
                         continue
                     try:
-                        sol, dist = solve_deterministic(m, n, preference_lists, opt, w)
+                        sol, dist = solve_non_deterministic(m, n, preference_lists)
                         if dist > max_dist_w:
                             max_dist_w = dist
                             max_vars_w = sol
@@ -82,7 +82,7 @@ def listener(num_iters):
     for item in iter(q.get, None):
         pbar.update()
 
-def solve_deterministic_distortion(m, n, use_cache=True, cache_name="deterministic"):
+def solve_non_deterministic_distortion(m, n, use_cache=True, cache_name="deterministic"):
     """For a given n, m, we want to solve all LPs like this.
     
     Thus, this is a total of O(LP(m^2n^2, nm) * m^2 * (m!)^n). 
@@ -139,7 +139,7 @@ def solve_deterministic_distortion(m, n, use_cache=True, cache_name="determinist
                 ret_dist = dist
     return dists, assoc_info, ret_dist, ret_vars, ret_errs
 
-def solve_deterministic(m, n, preference_lists, opt, w, debug=False):
+def solve_non_deterministic(m, n, preference_lists, debug=False):
     """
     Solve the LP problem given the number of candidates, voters, and their preferences.
     Runtime: O(nm) variables, O(n^2m^2) clauses
@@ -149,7 +149,6 @@ def solve_deterministic(m, n, preference_lists, opt, w, debug=False):
         n (int): Number of voters.
         preference_lists (list of lists): A list of n preference lists, each of length m.
         opt (int): Forced optimal candidate.
-        w (int): Chosen winner with preference lists.
 
     Returns:
         solution: A dictionary with the solution values for the variables.
@@ -162,48 +161,58 @@ def solve_deterministic(m, n, preference_lists, opt, w, debug=False):
     candidates = list(range(m))  # Candidate indices: 0, 1, ..., m-1
     voters = list(range(n))      # Voter indices: 0, 1, ..., n-1
 
-    # Decision variables d[v][x] for each voter v and candidate x
-    d = LpVariable.dicts("d", (voters, candidates), lowBound=0)
+      # Decision variables
+    Z = LpVariable("Z", lowBound=0)  # Objective variable
+    d = LpVariable.dicts("d", (voters, candidates), lowBound=0)  # Distances
+    o = LpVariable.dicts("o", candidates, lowBound=0)  # Optimality distribution
 
-    # Objective function: Maximize sum of d[v][w] for all v, w
-    model += lpSum(d[v][w] for v in voters)
+    # Objective function
+    model += Z
 
-    # Constraints
-    # Triangle Inequality: d[v][x] <= d[v'][x] + d[v'][y] + d[v][y]
-    for x in candidates:
-        for y in candidates:
-            for v1 in voters:
-               for v2 in voters:
-                    if x != y and v1 != v2:
-                        model += (
-                            d[v1][x] <= d[v2][x] + d[v2][y] + d[v1][y],
-                            f"triangle {v1} {v2} {x} {y}"
-                        )
+    # Constraint 1: Z ≤ Σ d[v, X] for all X
+    for X in candidates:
+        model += (Z <= lpSum(d[v][X] for v in voters), f"Z_bound_{X}")
 
-    # Consistency: d[v][x] <= d[v][y] if x >v y (x comes before y in v's preference list)
+    # Constraint 2: d[v, X] ≤ d[v', X] + d[v', Y] + L[Y, v] (Triangle Inequality)
     for v in voters:
-        for i, x in enumerate(preference_lists[v]):
-            for y in preference_lists[v][i+1:]:
-                model += (
-                    d[v][x] <= d[v][y],
-                    f"consistency {v} {x} {y}"
-                )
+        for v_prime in voters:
+            for X in candidates:
+                for Y in candidates:
+                    model += (
+                        d[v][X] <= d[v_prime][X] + d[v_prime][Y] + d[v][Y],
+                        f"triangle_ineq_{v}_{v_prime}_{X}_{Y}"
+                    )
 
-    # Normalization: Sum_{v} d[v][x] == 1 for all x
+    # Constraint 3: L[X, v] ≤ L[Y, v] for X ≥v Y (Consistency)
+    for v in voters:
+        for X in candidates:
+            for Y in candidates:
+                if X >= Y:  # Assuming we have a way to check if X >=v Y
+                    model += (
+                        d[v][X] <= d[v][Y],
+                        f"consistency_{v}_{X}_{Y}"
+                    )
+
+    # Constraint 4: Σ_v Σ_X o_X * L[X, v] = 1 (Normalization)
+    # todo: we do not support products, need to use a different library
     model += (
-        lpSum(d[v][opt] for v in voters) == 1,
-        f"normalization"
+        lpSum(o[X] * d[v][X] for v in voters for X in candidates) == 1,
+        "normalization"
     )
 
-    # Optimality of x*: Sum_{v} d[v][x] >= 1 for all x
+    # Constraint 5: Σ_v L[x, v] ≥ 1 for all x (Optimality of x*)
     for x in candidates:
-        if x != opt:
-            model += (
-                lpSum(d[v][x] for v in voters) >= 1,
-                f"optimality {x}"
-            )
+        model += (
+            lpSum(d[v][x] for v in voters) >= 1,
+            f"optimality_{x}"
+        )
 
-    # Solve the model
+    # Constraint 6: Σ_x o_x = 1 (Definition of optimality distribution)
+    model += (
+        lpSum(o[x] for x in candidates) == 1,
+        "opt_dist"
+    )
+
     status = model.solve(PULP_CBC_CMD(msg=debug))
 
     # Check the status of the solution

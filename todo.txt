@@ -1,0 +1,7 @@
+Exploit uniqueness. Do only combinations of first n - 1 preference lists, and then check symmetries, as well as symmetries of candidates.
+
+So essentially we group each into symmetry
+
+say group theory shit to scare off the professor
+
+Practically, there is no reason why a "simple rule" should not exist. However, generally these "simple rules" often must fulfill certain conditions
